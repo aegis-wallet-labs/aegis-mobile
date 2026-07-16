@@ -1,6 +1,6 @@
 # AEGIS Mobile
 
-The React Native and Expo mobile wallet for the AEGIS platform.
+The ai native mobile wallet for the Qorechain ecosystem.
 
 ## Requirements
 
