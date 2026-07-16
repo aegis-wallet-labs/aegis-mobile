@@ -23,4 +23,6 @@ Use `npm run android` or `npm run ios` to generate and run a native development 
 
 Never commit wallet mnemonics, private keys, signing material, production credentials, or local environment files. See [SECURITY.md](SECURITY.md).
 
-This repository is private and proprietary unless a license is added explicitly.
+## License
+
+Licensed under the [MIT License](LICENSE).

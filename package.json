@@ -49,5 +49,6 @@
   "private": true,
   "devDependencies": {
     "@types/react": "~19.2.14"
-  }
+  },
+  "license": "MIT"
 }
