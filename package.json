@@ -1,0 +1,53 @@
+{
+  "name": "aegis-ai-wallet-rn",
+  "version": "1.0.5",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
+    "web": "expo start --web",
+    "export:android": "expo export --platform android --output-dir dist/android --clear",
+    "doctor": "expo-doctor",
+    "check": "node scripts/check-app.mjs && tsc --noEmit"
+  },
+  "dependencies": {
+    "@expo-google-fonts/ibm-plex-mono": "^0.4.1",
+    "@expo-google-fonts/sora": "^0.4.2",
+    "@gorhom/bottom-sheet": "^5.2.14",
+    "@qorechain/connect": "^0.1.0",
+    "@qorechain/evm": "^0.7.0",
+    "@qorechain/react": "^0.7.0",
+    "@qorechain/sdk": "^0.7.0",
+    "@qorechain/svm": "^0.7.0",
+    "@qorechain/wallet-adapter": "^0.1.7",
+    "@solana/web3.js": "^1.98.4",
+    "cosmjs-types": "^0.11.0",
+    "expo": "~56.0.15",
+    "expo-camera": "~56.0.8",
+    "expo-clipboard": "~56.0.4",
+    "expo-crypto": "~56.0.4",
+    "expo-font": "~56.0.7",
+    "expo-haptics": "~56.0.3",
+    "expo-local-authentication": "~56.0.4",
+    "expo-secure-store": "~56.0.4",
+    "expo-splash-screen": "~56.0.12",
+    "expo-status-bar": "~56.0.4",
+    "lucide-react-native": "^1.23.0",
+    "react": "19.2.3",
+    "react-native": "0.85.3",
+    "react-native-gesture-handler": "^3.0.0",
+    "react-native-qrcode-svg": "^6.3.21",
+    "react-native-reanimated": "4.3.1",
+    "react-native-safe-area-context": "~5.7.0",
+    "react-native-svg": "^15.15.4",
+    "react-native-webview": "13.16.1",
+    "react-native-worklets": "0.8.3",
+    "viem": "^2.54.1"
+  },
+  "private": true,
+  "devDependencies": {
+    "@types/react": "~19.2.14"
+  }
+}

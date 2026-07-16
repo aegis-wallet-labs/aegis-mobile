@@ -1,0 +1,65 @@
+{
+  "expo": {
+    "name": "Aegis AI Wallet",
+    "slug": "aegis-ai-wallet",
+    "version": "1.0.5",
+    "orientation": "portrait",
+    "icon": "./assets/aegis/icon_1024.png",
+    "userInterfaceStyle": "dark",
+    "scheme": "aegisai",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.aegis.aegisai"
+    },
+    "android": {
+      "allowBackup": false,
+      "package": "com.aegis.aegis_ai",
+      "versionCode": 21,
+      "permissions": [
+        "INTERNET",
+        "USE_BIOMETRIC",
+        "USE_FINGERPRINT",
+        "CAMERA"
+      ],
+      "adaptiveIcon": {
+        "backgroundColor": "#000000",
+        "foregroundImage": "./assets/aegis/icon_foreground_sharp.png"
+      },
+      "softwareKeyboardLayoutMode": "resize"
+    },
+    "web": {
+      "favicon": "./assets/aegis/aegis_padded.png"
+    },
+    "plugins": [
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#000000",
+          "image": "./assets/aegis/splash_transparent.png",
+          "imageWidth": 128,
+          "resizeMode": "contain",
+          "dark": {
+            "backgroundColor": "#000000",
+            "image": "./assets/aegis/splash_transparent.png"
+          },
+          "android": {
+      "allowBackup": false,
+            "backgroundColor": "#000000",
+            "image": "./assets/aegis/splash_transparent.png",
+            "imageWidth": 128,
+            "resizeMode": "contain"
+          }
+        }
+      ],
+      "expo-secure-store",
+      "expo-local-authentication",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow Aegis AI Wallet to scan wallet and dapp QR codes."
+        }
+      ],
+      "expo-font"
+    ]
+  }
+}
