@@ -271,9 +271,61 @@ export function buildInjectedProvider(chainIdHex: string, chainIdDecimal: number
     try { window.dispatchEvent(new Event('keplr_keystorechange')); } catch (e) {}
   }
 
-  // The QoreChain SDK exposes a unified SVM address but no matching standard
-  // ed25519 signer. Do not impersonate a Phantom/Solana wallet here: doing so
-  // would expose the canonical address while signing with a different key.
+  /* ── SVM provider (Phantom-compatible, relay-backed) ────────────────────── */
+  // QoreChain SVM writes relay through the chain (MsgExecuteProgram); the
+  // wallet's primary key is the effective SVM signer, so signAndSendTransaction
+  // works without a separate ed25519 identity. Sign-only APIs reject with 4200.
+  function svmPublicKey(address) {
+    return { toString: function () { return address; }, toBase58: function () { return address; }, toJSON: function () { return address; } };
+  }
+  function svmSignOnlyError() {
+    var error = new Error('AEGIS executes QoreChain SVM actions through signAndSendTransaction; sign-only operations are not available yet.');
+    error.code = 4200;
+    return error;
+  }
+  var svmListeners = {};
+  function emitSvm(event, value) {
+    (svmListeners[event] || []).forEach(function (fn) { try { fn(value); } catch (e) {} });
+  }
+  var solana = {
+    isAegis: true,
+    isQoreWallet: true,
+    publicKey: null,
+    isConnected: false,
+    connect: function () {
+      return bridge('svm_connect', []).then(function (result) {
+        var address = String((result && result.publicKey) || result || '');
+        solana.publicKey = svmPublicKey(address);
+        solana.isConnected = true;
+        emitSvm('connect', solana.publicKey);
+        return { publicKey: solana.publicKey };
+      });
+    },
+    disconnect: function () {
+      return bridge('svm_disconnect', []).then(function () {
+        solana.publicKey = null;
+        solana.isConnected = false;
+        emitSvm('disconnect');
+      });
+    },
+    signAndSendTransaction: function (tx) {
+      var versioned = typeof (tx && tx.version) !== 'undefined';
+      var raw = tx && typeof tx.serialize === 'function' ? tx.serialize({ requireAllSignatures: false, verifySignatures: false }) : tx;
+      var bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+      return bridge('svm_signAndSendTransaction', [u8ToB64(bytes), versioned]).then(function (result) {
+        return { signature: (result && result.signature) || result };
+      });
+    },
+    signTransaction: function () { return Promise.reject(svmSignOnlyError()); },
+    signAllTransactions: function () { return Promise.reject(svmSignOnlyError()); },
+    signMessage: function () { return Promise.reject(svmSignOnlyError()); },
+    on: function (event, fn) { (svmListeners[event] = svmListeners[event] || []).push(fn); return solana; },
+    off: function (event, fn) { svmListeners[event] = (svmListeners[event] || []).filter(function (f) { return f !== fn; }); return solana; },
+    removeListener: function (event, fn) { return solana.off(event, fn); },
+  };
+  window.aegisSolana = solana;
+  if (!window.phantom) { try { window.phantom = { solana: solana }; } catch (e) {} }
+  if (!window.solana) { try { window.solana = solana; } catch (e) {} }
 
 })();
 true;

@@ -19,6 +19,7 @@ import {
   symbolForDenom,
 } from '../qoreWallet';
 import { formatAmountDisplay } from '../format';
+import { recordLocalTx, updateLocalTx } from '../walletStorage';
 import { useTheme } from '../ThemeContext';
 import { fonts, spacing } from '../theme';
 import {
@@ -341,6 +342,18 @@ export function SwapScreen({ wallet, auth, selectedNetwork, prefill }: any) {
     setSubmitError('');
     setResult(null);
     setSubmitting(true);
+    // Track locally so the swap appears in Activity as pending → success/failed
+    // even if it fails at broadcast (and so never reaches on-chain history).
+    const localId = `local_${Date.now()}`;
+    const nativeAddress = wallet.accounts?.native?.address;
+    recordLocalTx(selectedNetwork, nativeAddress, {
+      id: localId,
+      kind: 'swap',
+      title: 'Swap',
+      symbol: symbolForDenom(denomIn),
+      amount,
+      status: 'Pending',
+    }).catch(() => {});
     try {
       const swapResult = await submitAmmSwap({
         mnemonic: wallet.mnemonic,
@@ -355,8 +368,14 @@ export function SwapScreen({ wallet, auth, selectedNetwork, prefill }: any) {
       });
       setResult(swapResult);
       setRefreshKey((key) => key + 1);
+      updateLocalTx(selectedNetwork, nativeAddress, localId, {
+        status: 'Success',
+        hash: swapResult?.txHash,
+        explorerUrl: swapResult?.explorerUrl,
+      }).catch(() => {});
     } catch (caught: any) {
       setSubmitError(caught?.message || String(caught));
+      updateLocalTx(selectedNetwork, nativeAddress, localId, { status: 'Failed' }).catch(() => {});
     } finally {
       setSubmitting(false);
     }
@@ -418,12 +437,29 @@ export function SwapScreen({ wallet, auth, selectedNetwork, prefill }: any) {
     setBridgeSubmitError('');
     setBridgeResult(null);
     setSubmitting(true);
+    const localId = `local_${Date.now()}`;
+    const nativeAddress = wallet.accounts?.native?.address;
+    recordLocalTx(selectedNetwork, nativeAddress, {
+      id: localId,
+      kind: 'bridge',
+      title: 'Bridge',
+      symbol: symbolForDenom(bridgeAsset),
+      amount: bridgeAmount,
+      counterparty: bridgeDestinationAddress,
+      status: 'Pending',
+    }).catch(() => {});
     try {
       const transferResult = await submitBridgeTransfer({ mnemonic: wallet.mnemonic, amount: bridgeAmount, asset: bridgeAsset, destinationChain: bridgePreview?.chain?.chainId || selectedBridgeChain.chainId, destinationAddress: bridgeDestinationAddress, networkKey: selectedNetwork, routeStatus: bridgePreview?.routeStatus });
       setBridgeResult(transferResult);
       setRefreshKey((key) => key + 1);
+      updateLocalTx(selectedNetwork, nativeAddress, localId, {
+        status: 'Success',
+        hash: transferResult?.txHash,
+        explorerUrl: transferResult?.explorerUrl,
+      }).catch(() => {});
     } catch (caught: any) {
       setBridgeSubmitError(caught?.message || String(caught));
+      updateLocalTx(selectedNetwork, nativeAddress, localId, { status: 'Failed' }).catch(() => {});
     } finally {
       setSubmitting(false);
     }

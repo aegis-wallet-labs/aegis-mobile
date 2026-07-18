@@ -7,6 +7,44 @@ const NETWORK_KEY = 'aegis.qore.network.v1';
 
 export const MAX_WALLETS = 10;
 
+// ── Price history (24h trend) ────────────────────────────────────────────────
+// Rolling window of QOR/USD samples. Hourly sampling over 48h stays well under
+// SecureStore's per-key size limits (~48 entries).
+
+const priceHistoryKey = (networkKey) => `aegis.qore.pricehistory.${networkKey}.v1`;
+
+export async function recordPriceSnapshot(networkKey, price) {
+  if (!Number.isFinite(price) || price <= 0) return;
+  try {
+    const now = Date.now();
+    const raw = await SecureStore.getItemAsync(priceHistoryKey(networkKey));
+    const list = (raw ? JSON.parse(raw) : []).filter((item) => now - item.at < 48 * 3600_000);
+    const last = list[list.length - 1];
+    if (!last || now - last.at > 3600_000) list.push({ at: now, price });
+    await SecureStore.setItemAsync(priceHistoryKey(networkKey), JSON.stringify(list), secureOpts);
+  } catch {}
+}
+
+/** % change vs ~24h ago, or null when there is not enough history yet. */
+export async function getPriceChange24h(networkKey, current) {
+  if (!Number.isFinite(current) || current <= 0) return null;
+  try {
+    const raw = await SecureStore.getItemAsync(priceHistoryKey(networkKey));
+    const list = raw ? JSON.parse(raw) : [];
+    const target = Date.now() - 24 * 3600_000;
+    // Prefer the sample closest to 24h ago; fall back to the oldest sample at
+    // least 1h old so a fresh install shows movement once history accrues.
+    const candidates = list.filter((item) => item.at <= target + 6 * 3600_000);
+    const base = candidates.length
+      ? candidates.reduce((best, item) => (Math.abs(item.at - target) < Math.abs(best.at - target) ? item : best))
+      : list.find((item) => Date.now() - item.at > 3600_000);
+    if (!base || !Number.isFinite(base.price) || base.price <= 0) return null;
+    return ((current - base.price) / base.price) * 100;
+  } catch {
+    return null;
+  }
+}
+
 const secureOpts = { keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY };
 
 // ── Multi-wallet store ───────────────────────────────────────────────────────
@@ -269,6 +307,34 @@ export async function clearBrowserHistory() {
   return [];
 }
 
+// ── PQC key registration flags ───────────────────────────────────────────────
+// Registration is once per address PER CHAIN, and a duplicate attempt is
+// included on-chain as a failed tx that still burns its fee (~0.1 QOR). The
+// in-memory set in qoreWallet resets on every app launch, so persist the flag.
+
+const PQC_REGISTERED_KEY = 'aegis.qore.pqcRegistered.v1';
+
+async function readPqcRegisteredMap() {
+  try {
+    const raw = await SecureStore.getItemAsync(PQC_REGISTERED_KEY);
+    const map = raw ? JSON.parse(raw) : {};
+    return map && typeof map === 'object' ? map : {};
+  } catch {
+    return {};
+  }
+}
+
+export async function isPqcRegistered(networkKey, address) {
+  const map = await readPqcRegisteredMap();
+  return Boolean(map[`${networkKey === 'testnet' ? 'testnet' : 'mainnet'}.${address}`]);
+}
+
+export async function markPqcRegistered(networkKey, address) {
+  const map = await readPqcRegisteredMap();
+  map[`${networkKey === 'testnet' ? 'testnet' : 'mainnet'}.${address}`] = true;
+  await SecureStore.setItemAsync(PQC_REGISTERED_KEY, JSON.stringify(map));
+}
+
 // ── Local transaction log (per wallet + network) ─────────────────────────────
 // The activity feed is otherwise built from confirmed on-chain history only, so
 // a transaction that fails at broadcast (or is still pending) shows nothing.
@@ -277,6 +343,22 @@ export async function clearBrowserHistory() {
 const localTxKey = (networkKey, address) =>
   `aegis.qore.localtx.${networkKey === 'testnet' ? 'testnet' : 'mainnet'}.${address || 'none'}.v1`;
 const MAX_LOCAL_TX = 15;
+
+// Screens subscribe so a submitted tx appears in Activity immediately and its
+// pending → success/failed flip renders live — no pull-to-refresh needed.
+type LocalTxListener = (info: { status?: string }) => void;
+const localTxListeners = new Set<LocalTxListener>();
+
+export function subscribeLocalTxs(listener: LocalTxListener) {
+  localTxListeners.add(listener);
+  return () => { localTxListeners.delete(listener); };
+}
+
+function emitLocalTxs(info: { status?: string }) {
+  for (const listener of [...localTxListeners]) {
+    try { listener(info); } catch {}
+  }
+}
 
 export async function getLocalTxs(networkKey, address) {
   try {
@@ -292,6 +374,7 @@ export async function recordLocalTx(networkKey, address, tx) {
   const list = await getLocalTxs(networkKey, address);
   const next = [{ at: Date.now(), ...tx }, ...list.filter((item) => item.id !== tx.id)].slice(0, MAX_LOCAL_TX);
   await SecureStore.setItemAsync(localTxKey(networkKey, address), JSON.stringify(next));
+  emitLocalTxs({ status: tx?.status });
   return next;
 }
 
@@ -299,5 +382,6 @@ export async function updateLocalTx(networkKey, address, id, patch) {
   const list = await getLocalTxs(networkKey, address);
   const next = list.map((item) => (item.id === id ? { ...item, ...patch } : item));
   await SecureStore.setItemAsync(localTxKey(networkKey, address), JSON.stringify(next));
+  emitLocalTxs({ status: patch?.status });
   return next;
 }

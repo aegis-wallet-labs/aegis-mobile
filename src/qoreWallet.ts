@@ -16,6 +16,7 @@ import {
   generateMnemonic,
   getNetwork,
   keccak256,
+  msg as qoreMsg,
   isValidBech32,
   isValidEvmAddress,
   isValidSvmAddress,
@@ -30,7 +31,7 @@ import {
 } from '@qorechain/sdk';
 import { createEvmClient, erc20, evmAccountFromPrivateKey, PRECOMPILE_ADDRESSES } from '@qorechain/evm';
 import { formatAmountDisplay, formatUsdDisplay, formatUsdPrice } from './format';
-import { getImportedTokens, getLocalTxs } from './walletStorage';
+import { getImportedTokens, getLocalTxs, getPriceChange24h, isPqcRegistered, markPqcRegistered, recordPriceSnapshot } from './walletStorage';
 import { createMemoInstruction, createSvmClient } from '@qorechain/svm';
 import { PublicKey } from '@solana/web3.js';
 import { secp256k1 } from '@noble/curves/secp256k1';
@@ -61,13 +62,34 @@ export function maxSendableQor(balance = '0', networkKey = defaultNetworkKey) {
   return fromBase(sendableBase.toString(), { exponent: 6 });
 }
 
+// The SDK's isValidSvmAddress requires an on-curve ed25519 point, but
+// QoreChain's unified SVM addresses (padded 20-byte accounts) and Solana PDAs
+// are off-curve yet valid recipients — accept any 32-byte base58 value.
+const BASE58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+function isSvm32ByteAddress(value) {
+  if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(value)) return false;
+  const bytes = [0];
+  for (const char of value) {
+    let carry = BASE58_ALPHABET.indexOf(char);
+    if (carry === -1) return false;
+    for (let index = 0; index < bytes.length; index += 1) {
+      carry += bytes[index] * 58;
+      bytes[index] = carry & 0xff;
+      carry >>= 8;
+    }
+    while (carry > 0) { bytes.push(carry & 0xff); carry >>= 8; }
+  }
+  for (let index = 0; index < value.length && value[index] === '1'; index += 1) bytes.push(0);
+  return bytes.length === 32;
+}
+
 /** True for address formats supported by the wallet's current send paths. */
 export function isValidWalletAddress(address) {
   const value = String(address || '').trim();
   if (!value) return false;
   if (value.startsWith('qor1')) return isValidBech32(value, 'qor');
-  if (value.startsWith('0x')) return isValidEvmAddress(value);
-  return false;
+  if (/^0x/i.test(value)) return isValidEvmAddress(value);
+  return isValidSvmAddress(value) || isSvm32ByteAddress(value);
 }
 
 /** QoreChain native and EVM addresses are two encodings of one 20-byte account. */
@@ -316,7 +338,17 @@ async function fetchQorPriceUsd(networkKey) {
     }
   } catch {}
   qorPriceCache.set(networkKey, { price, at: Date.now() });
+  // Accrue history whenever a price is observed so the 24h trend has data.
+  if (price != null) recordPriceSnapshot(networkKey, price).catch?.(() => {});
   return price;
+}
+
+/** Portfolio 24h trend (%) from locally accrued price snapshots; null until
+ * both a live pool price and ≥1h of history exist. */
+export async function fetchQorChange24h(networkKey = defaultNetworkKey) {
+  const price = await fetchQorPriceUsd(networkKey);
+  if (price == null) return null;
+  return getPriceChange24h(networkKey, price);
 }
 
 export function inferRecipientVm(address = '') {
@@ -554,14 +586,19 @@ function transferDetailsFromTx(tx, address) {
       };
     }
     if (/MsgRegisterPQCKey(?:V2)?$/.test(type)) {
+      // Keep the real tx status (don't dress a failed duplicate up as done);
+      // failed duplicates are filtered out of the feed entirely below.
       return {
         kind: 'security',
         title: 'Quantum security enabled',
-        status: 'Set up automatically',
         symbol: 'QOR',
         description: 'Your wallet registered its quantum security key before its first protected transaction. This happens once per wallet.',
       };
     }
+    if (type.endsWith('MsgExecuteProgram')) return { kind: 'contract', title: 'SVM transaction', symbol: 'QOR' };
+    if (type.endsWith('MsgExecuteContract')) return { kind: 'contract', title: 'Contract call', symbol: 'QOR' };
+    if (/MsgEthereumTx/.test(type)) return { kind: 'contract', title: 'EVM transaction', symbol: 'QOR' };
+    if (/RegisterAuthenticator/i.test(type)) return { kind: 'security', title: 'Signer linked', symbol: 'QOR' };
     if (/swap/i.test(type)) {
       const coin = message.token_in || {};
       return {
@@ -579,7 +616,10 @@ function parseTxResponses(response, config, source, address) {
   return (response?.tx_responses || []).map((tx) => ({
     hash: tx.txhash,
     title: source,
-    status: Number(tx.code || 0) === 0 ? 'Success' : `Failed (${tx.code})`,
+    // Plain "Failed" in lists — "(7)" reads like a count; the numeric code
+    // is carried separately for the detail screen.
+    status: Number(tx.code || 0) === 0 ? 'Success' : 'Failed',
+    errorCode: Number(tx.code || 0) !== 0 ? String(tx.code) : '',
     height: tx.height,
     timestamp: tx.timestamp,
     explorerUrl: txExplorerUrl(config, tx.txhash),
@@ -646,6 +686,7 @@ export async function fetchWalletActivity(wallet, networkKey = defaultNetworkKey
       ...local.map((entry) => ({
         hash: entry.hash || entry.id,
         title: entry.title || 'Transaction',
+        errorCode: entry.errorCode || '',
         status: entry.status || 'Pending',
         kind: entry.kind,
         symbol: entry.symbol,
@@ -662,6 +703,9 @@ export async function fetchWalletActivity(wallet, networkKey = defaultNetworkKey
   const unique = rows.filter((row) => {
     if (!row.hash || seen.has(row.hash)) return false;
     seen.add(row.hash);
+    // Failed duplicate key registrations are protocol noise (the key was
+    // already registered) — confusing in a user's history, so drop them.
+    if (row.kind === 'security' && /fail/i.test(row.status || '')) return false;
     return true;
   });
   unique.sort((a, b) => {
@@ -1026,46 +1070,74 @@ export async function dappCosmosBroadcast(txB64, networkKey = defaultNetworkKey)
 
 // â”€â”€ SVM (Phantom-compatible) dapp handlers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-function canonicalSvmSignerUnavailable(): never {
-  throw new Error('SVM signing is unavailable until QoreChain exposes an SDK signer for the canonical unified SVM address.');
+// Public SVM RPC is read-only on QoreChain; SVM writes execute via
+// MsgExecuteProgram on the cosmos lane. With no `auth` field the Cosmos
+// sender's canonical account IS the effective SVM signer — AEGIS holds the
+// primary key, so no authenticator/relayer is needed (verified live on Diana).
+
+function svmSignOnlyUnavailable(): never {
+  const error: any = new Error('AEGIS executes QoreChain SVM actions through signAndSendTransaction; sign-only operations are not available yet.');
+  error.code = 4200;
+  throw error;
 }
 
 export async function dappSvmSignMessage(_mnemonic, _messageB64) {
-  return canonicalSvmSignerUnavailable();
+  return svmSignOnlyUnavailable();
 }
 
-async function svmKeypair(_mnemonic) {
-  return canonicalSvmSignerUnavailable();
+export async function dappSvmSignTransaction(_mnemonic, _txB64, _versioned = false) {
+  return svmSignOnlyUnavailable();
 }
 
-async function svmSignTxBytes(mnemonic, txB64, versioned) {
-  const keypair = await svmKeypair(mnemonic);
+/** Decode a serialized Solana transaction into MsgExecuteProgram messages. */
+async function svmMessagesFromTxBytes(sender, txB64, versioned) {
   const { Transaction, VersionedTransaction } = await import('@solana/web3.js');
+  const bytes = b64ToBytes(txB64);
+  let instructions;
   try {
-    const bytes = b64ToBytes(txB64);
     if (versioned) {
       const tx = VersionedTransaction.deserialize(bytes);
-      tx.sign([keypair]);
-      return tx.serialize();
+      const message = tx.message;
+      const keys = message.staticAccountKeys;
+      if (message.addressTableLookups?.length) throw new Error('Address-table lookups are not supported on the QoreChain SVM relay yet.');
+      instructions = message.compiledInstructions.map((ix) => ({
+        programId: keys[ix.programIdIndex].toBytes(),
+        keys: ix.accountKeyIndexes.map((index) => ({ address: keys[index].toBytes(), isSigner: message.isAccountSigner(index), isWritable: message.isAccountWritable(index) })),
+        data: ix.data,
+      }));
+    } else {
+      const tx = Transaction.from(bytes);
+      instructions = tx.instructions.map((ix) => ({
+        programId: ix.programId.toBytes(),
+        keys: ix.keys.map((key) => ({ address: key.pubkey.toBytes(), isSigner: key.isSigner, isWritable: key.isWritable })),
+        data: new Uint8Array(ix.data),
+      }));
     }
-    const tx = Transaction.from(bytes);
-    tx.partialSign(keypair);
-    return new Uint8Array(tx.serialize({ requireAllSignatures: false, verifySignatures: false }));
-  } catch {
-    throw new Error('That input is not a valid serialized SVM transaction. Paste base64 transaction bytes, not an address.');
+  } catch (caught: any) {
+    throw new Error(caught?.message || 'That input is not a valid serialized SVM transaction.');
   }
+  return instructions.map((ix) => qoreMsg.svm.executeProgram({
+    sender,
+    programId: ix.programId,
+    accounts: ix.keys.map((key) => ({ address: key.address, isSigner: key.isSigner, isWritable: key.isWritable })),
+    data: ix.data,
+  }));
 }
 
-export async function dappSvmSignTransaction(mnemonic, txB64, versioned = false) {
-  return bytesToB64(await svmSignTxBytes(mnemonic, txB64, versioned));
-}
-
+/** Phantom-style signAndSendTransaction: relay the tx's instructions on-chain
+ * (atomic — one tx body) with the hybrid PQC signature. Returns the hash. */
 export async function dappSvmSignAndSend(mnemonic, txB64, versioned = false, networkKey = defaultNetworkKey) {
-  const config = getNetworkConfig(networkKey);
-  if (!config.endpoints.svmRpc) throw new Error(`${config.shortName} SVM endpoint is unavailable.`);
-  const signed = await svmSignTxBytes(mnemonic, txB64, versioned);
-  const svmClient = createSvmClient({ endpoints: { svmRpc: config.endpoints.svmRpc } });
-  return (svmClient as any).sendRawTransaction(signed);
+  const account = await getUnifiedAccount(mnemonic);
+  const messages = await svmMessagesFromTxBytes(account.cosmos, txB64, versioned);
+  if (!messages.length) throw new Error('The SVM transaction contains no instructions.');
+  const result = await submitHybridMessages({
+    mnemonic,
+    messages,
+    memo: 'Aegis SVM relay',
+    networkKey,
+    gasFloor: 900000,
+  });
+  return result.transactionHash;
 }
 
 /** Read-only JSON-RPC passthrough for the injected provider. */
@@ -1269,8 +1341,35 @@ async function submitHybridMessages({ mnemonic, messages, memo = 'Aegis AI Walle
 
   // One-time PQC key registration (classical-exempt bootstrap). We broadcast
   // MsgRegisterPQCKeyV2 signed classically; if the key is already registered the
-  // chain rejects it, which we treat as done.
-  if (!pqcRegisteredAddresses.has(unified.cosmos)) {
+  // chain rejects it, which we treat as done. Registration is per address PER
+  // CHAIN; the flag is persisted because a duplicate attempt is included
+  // on-chain as a failed tx and still burns its fee (~0.1 QOR) — without
+  // persistence every app launch would waste that on its first transaction.
+  const pqcKey = `${config.key}.${unified.cosmos}`;
+  if (!pqcRegisteredAddresses.has(pqcKey) && await isPqcRegistered(config.key, unified.cosmos)) {
+    pqcRegisteredAddresses.add(pqcKey);
+  }
+  // A wallet restored on a new device has no local flag but may already be
+  // registered on-chain. Hybrid signatures are mandatory, so ANY successful
+  // past tx from this address proves the key is registered — one free history
+  // read instead of a duplicate registration that burns its fee as Failed(7).
+  if (!pqcRegisteredAddresses.has(pqcKey)) {
+    try {
+      const restBase = config.endpoints.rest.replace(/\/$/, '');
+      const filter = encodeURIComponent(`message.sender='${unified.cosmos}'`);
+      let data: any = null;
+      // Cosmos SDK 0.50+ expects `query`; older REST edges still want `events`.
+      for (const param of ['query', 'events']) {
+        const response = await fetch(`${restBase}/cosmos/tx/v1beta1/txs?${param}=${filter}&pagination.limit=10`);
+        if (response.ok) { data = await response.json(); break; }
+      }
+      if ((data?.tx_responses || []).some((tx) => Number(tx.code || 0) === 0)) {
+        pqcRegisteredAddresses.add(pqcKey);
+        markPqcRegistered(config.key, unified.cosmos).catch(() => {});
+      }
+    } catch {}
+  }
+  if (!pqcRegisteredAddresses.has(pqcKey)) {
     try {
       const registerMsg = buildRegisterPqcKeyMsg(unified.cosmos, {
         pqcKeypair: unified.pqc,
@@ -1287,11 +1386,18 @@ async function submitHybridMessages({ mnemonic, messages, memo = 'Aegis AI Walle
         sequence: meta.sequence,
         memo: 'Register quantum key',
       });
-      if (Number(result.code || 0) === 0) pqcRegisteredAddresses.add(unified.cosmos);
+      // Delivered code 0 = registered now; a duplicate attempt is delivered
+      // with a non-zero code whose log says the key already exists — both
+      // mean this address is registered on this chain.
+      if (Number(result.code || 0) === 0 || /already registered|already exists|duplicate|key exists|pqc key/i.test(String(result.rawLog || ''))) {
+        pqcRegisteredAddresses.add(pqcKey);
+        markPqcRegistered(config.key, unified.cosmos).catch(() => {});
+      }
     } catch (caught: any) {
       const message = String(caught?.message || caught || '');
       if (/already registered|already exists|duplicate|key exists|pqc key/i.test(message)) {
-        pqcRegisteredAddresses.add(unified.cosmos);
+        pqcRegisteredAddresses.add(pqcKey);
+        markPqcRegistered(config.key, unified.cosmos).catch(() => {});
       } else {
         throw caught;
       }
@@ -1412,7 +1518,9 @@ export function composeTokenTransfer({ wallet, token, toAddress, amount = '0', n
   const config = getNetworkConfig(networkKey);
   return {
     kind: 'SVM transfer',
-    broadcastEnabled: Boolean(config.endpoints.svmRpc) && !config.edgeNote,
+    // Relayed through the chain (MsgExecuteProgram) — needs the cosmos
+    // endpoints, not SVM RPC write access.
+    broadcastEnabled: getRpcStatus(networkKey).enabled,
     rpcStatus: getRpcStatus(networkKey),
     message: {
       typeUrl: 'svm.system.transfer',
@@ -1454,18 +1562,46 @@ export async function submitSvmTransfer({ mnemonic, toAddress, amount = '0', net
   if (!toAddress?.trim()) throw new Error('Recipient address is required.');
 
   const config = getNetworkConfig(networkKey);
-  if (!config.endpoints.svmRpc) throw new Error(`${config.shortName} SVM JSON-RPC endpoint is required before broadcasting.`);
-  if (config.edgeNote) throw new Error(config.edgeNote);
-
-  return canonicalSvmSignerUnavailable();
+  // SVM transfers relay through the chain: a system-program transfer
+  // instruction wrapped in MsgExecuteProgram, signed by the primary key.
+  const { SystemProgram } = await import('@solana/web3.js');
+  const account = await getUnifiedAccount(mnemonic);
+  const instruction = SystemProgram.transfer({
+    fromPubkey: new PublicKey(account.svm),
+    toPubkey: new PublicKey(toAddress.trim()),
+    lamports: BigInt(parseUnits(normalizeAmount(amount), 9).toString()),
+  });
+  const message = qoreMsg.svm.executeProgram({
+    sender: account.cosmos,
+    programId: instruction.programId.toBytes(),
+    accounts: instruction.keys.map((key) => ({ address: key.pubkey.toBytes(), isSigner: key.isSigner, isWritable: key.isWritable })),
+    data: new Uint8Array(instruction.data),
+  });
+  const result = await submitHybridMessages({
+    mnemonic,
+    messages: [message],
+    memo: 'Aegis AI Wallet SVM transfer',
+    networkKey: config.key,
+    gasFloor: 900000,
+  });
+  const txHash = result.transactionHash;
+  return {
+    kind: 'SVM transfer',
+    network: config.shortName,
+    txHash,
+    quantumSecured: true,
+    explorerUrl: txHash ? txExplorerUrl(config, txHash) : '',
+  };
 }
 
-export async function submitTokenTransfer({ mnemonic, token, toAddress, amount = '0', networkKey = defaultNetworkKey }) {
+export async function submitTokenTransfer({ mnemonic, token, toAddress, amount = '0', networkKey = defaultNetworkKey, memo = '' }) {
+  // Cosmos memos cap at 256 chars; EVM/SVM lanes have no memo field.
+  const cleanMemo = String(memo || '').trim().slice(0, 256) || 'Aegis AI Wallet';
   if (token?.erc20Address) {
     return submitErc20Transfer({ mnemonic, token, toAddress, amount, networkKey });
   }
   if (token?.denom !== 'uqor') {
-    return submitNativeTransfer({ mnemonic, toAddress: toNativeAddress(toAddress), amount, denom: token.denom, decimals: token.decimals || 6, memo: 'Aegis AI Wallet', networkKey });
+    return submitNativeTransfer({ mnemonic, toAddress: toNativeAddress(toAddress), amount, denom: token.denom, decimals: token.decimals || 6, memo: cleanMemo, networkKey });
   }
   // Native QOR lives in the cosmos bank module — that's the balance the wallet
   // shows. Deliver via a bank transfer to the recipient's qor1 encoding; for a
@@ -1478,7 +1614,7 @@ export async function submitTokenTransfer({ mnemonic, token, toAddress, amount =
     nativeRecipient = toNativeAddress(toAddress);
   } catch {}
   if (nativeRecipient) {
-    return submitNativeTransfer({ mnemonic, toAddress: nativeRecipient, amount, denom: 'uqor', decimals: 6, memo: 'Aegis AI Wallet', networkKey });
+    return submitNativeTransfer({ mnemonic, toAddress: nativeRecipient, amount, denom: 'uqor', decimals: 6, memo: cleanMemo, networkKey });
   }
   return submitSvmTransfer({ mnemonic, toAddress, amount, networkKey });
 }

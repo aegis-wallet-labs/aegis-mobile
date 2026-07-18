@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { getCachedSync, readCache, subscribeCache, writeCache } from './dataCache';
 import { defaultTokens, fetchWalletActivity, fetchWalletAssets, fetchWalletNfts } from './qoreWallet';
+import { subscribeLocalTxs } from './walletStorage';
 
 // Caches are keyed per network AND per wallet address, so switching wallets
 // resets instantly to that wallet's last-known data — never another wallet's.
@@ -28,19 +29,26 @@ export function useWalletAssets(wallet: any, networkKey: string, refreshKey = 0)
         setHydrated(true);
       }
     });
-    fetchWalletAssets(wallet, networkKey as any)
-      .then((fresh: any[]) => {
-        if (!active) return;
-        setTokens(fresh);
-        setHydrated(true);
-        setError('');
-        writeCache(cacheKey, fresh);
-      })
-      .catch((caught: any) => {
-        if (active) setError(caught?.message || 'Unable to load wallet data.');
-      });
+    const load = () =>
+      fetchWalletAssets(wallet, networkKey as any)
+        .then((fresh: any[]) => {
+          if (!active) return;
+          setTokens(fresh);
+          setHydrated(true);
+          setError('');
+          writeCache(cacheKey, fresh);
+        })
+        .catch((caught: any) => {
+          if (active) setError(caught?.message || 'Unable to load wallet data.');
+        });
+    load();
+    // A settled transaction changes balances — refetch without pull-to-refresh.
+    const unsubscribeLocal = subscribeLocalTxs(({ status }) => {
+      if (status && status !== 'Pending') load();
+    });
     return () => {
       active = false;
+      unsubscribeLocal();
     };
   }, [cacheKey, refreshKey]);
 
@@ -120,20 +128,33 @@ export function useWalletActivity(wallet: any, networkKey: string, refreshKey = 
         setHydrated(true);
       }
     });
-    fetchWalletActivity(wallet, networkKey as any)
-      .then((fresh: any[]) => {
-        if (!active) return;
-        const trimmed = trimActivity(fresh);
-        setActivity(trimmed);
-        setHydrated(true);
-        writeCache(cacheKey, trimmed);
-      })
-      .catch(() => {
-        if (active) setHydrated(true);
-      });
+    let pendingTimer: ReturnType<typeof setTimeout> | null = null;
+    const load = () =>
+      fetchWalletActivity(wallet, networkKey as any)
+        .then((fresh: any[]) => {
+          if (!active) return;
+          const trimmed = trimActivity(fresh);
+          setActivity(trimmed);
+          setHydrated(true);
+          writeCache(cacheKey, trimmed);
+          // While anything is still pending, keep re-polling so the row flips
+          // to success/failed on its own — no pull-to-refresh needed.
+          if (pendingTimer) clearTimeout(pendingTimer);
+          if (trimmed.some((row) => /pending/i.test(row.status || ''))) {
+            pendingTimer = setTimeout(load, 6000);
+          }
+        })
+        .catch(() => {
+          if (active) setHydrated(true);
+        });
+    load();
+    // A tx was just recorded or settled anywhere in the app — refetch now.
+    const unsubscribeLocal = subscribeLocalTxs(() => load());
     return () => {
       active = false;
       unsubscribe();
+      unsubscribeLocal();
+      if (pendingTimer) clearTimeout(pendingTimer);
     };
   }, [cacheKey, refreshKey]);
 
