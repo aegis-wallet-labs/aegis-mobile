@@ -15,6 +15,7 @@ import {
 
   fetchWalletAssets,
   fetchAmmRouteStatus,
+  fetchQorChange24h,
   maxSendableQor,
   nativeTransferFeeReserve,
   shortAddress,
@@ -571,7 +572,7 @@ export function HomeScreen({ wallet, auth, walletOps, walletsKey, contactsKey, n
             suggestion cards still receive their own touches first. */}
         <Pressable onPress={Keyboard.dismiss} accessible={false}>
         {visibleMessages.length === 0 ? (
-          <Dashboard tokens={tokens} send={send} onTab={onTab} />
+          <Dashboard tokens={tokens} send={send} onTab={onTab} selectedNetwork={selectedNetwork} />
         ) : (
           <View>
             {visibleMessages.map((message: any, index: number) => (
@@ -767,7 +768,7 @@ export function HomeScreen({ wallet, auth, walletOps, walletsKey, contactsKey, n
   );
 }
 
-function Dashboard({ tokens, send, onTab }: any) {
+function Dashboard({ tokens, send, onTab, selectedNetwork }: any) {
   const { colors } = useTheme();
   const { t } = useI18n();
   const totalUsd = tokens.reduce(
@@ -776,11 +777,18 @@ function Dashboard({ tokens, send, onTab }: any) {
     0,
   );
 
-  // No historical price feed yet — today's change is genuinely 0 until one exists.
-  const changeUsd = 0;
-  const changePct = 0;
-  const up = changeUsd >= 0;
-  const trendColor = changeUsd === 0 ? colors.subtle : up ? colors.positive : colors.negative;
+  // 24h trend from locally accrued price snapshots (null until a pool price
+  // and ≥1h of history exist — the chip stays hidden until then).
+  const [livePct, setLivePct] = useState<number | null>(null);
+  useEffect(() => {
+    let active = true;
+    fetchQorChange24h(selectedNetwork).then((pct) => { if (active) setLivePct(pct); }).catch(() => {});
+    return () => { active = false; };
+  }, [selectedNetwork, tokens]);
+  const changePct = Number.isFinite(livePct) ? (livePct as number) : 0;
+  const changeUsd = totalUsd * (changePct / 100);
+  const up = changePct >= 0;
+  const trendColor = changePct === 0 ? colors.subtle : up ? colors.positive : colors.negative;
   const TrendIcon = up ? TrendingUp : TrendingDown;
 
   return (

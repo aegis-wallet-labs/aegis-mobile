@@ -521,18 +521,30 @@ export function BrowserScreen({ url, navigationRequest, onUrl, wallet, auth, sel
           return respond(id, null, await dappCosmosBroadcast(String(params[0] || ''), selectedNetwork));
 
         case 'qore_svmConnect':
-        case 'svm_connect':
+        case 'svm_connect': {
+          if (approvedOrigin(origin)) {
+            return respond(id, null, method === 'svm_connect' ? { publicKey: svmAddress } : svmAddress);
+          }
+          return enqueue('connect', { lane: 'svm', raw: method === 'svm_connect' });
+        }
         case 'svm_disconnect':
+          return respond(id, null, true);
         case 'qore_svmSignMessage':
         case 'svm_signMessage':
         case 'qore_svmSignTransaction':
         case 'svm_signTransaction':
-        case 'qore_svmSignAndSend':
-        case 'svm_signAndSendTransaction':
           return respond(id, {
             code: 4200,
-            message: 'Standard SVM wallet signing is not available for the QoreChain unified SVM address.',
+            message: 'AEGIS executes QoreChain SVM actions through signAndSendTransaction; sign-only operations are not available yet.',
           }, null);
+        case 'qore_svmSignAndSend':
+        case 'svm_signAndSendTransaction':
+          return enqueue('svmTx', {
+            txB64: String(params[0] || ''),
+            versioned: Boolean(params[1]),
+            send: true,
+            raw: method === 'svm_signAndSendTransaction',
+          });
 
         default:
           return respond(id, null, await dappRpcRequest(method, params, selectedNetwork));

@@ -651,6 +651,18 @@ export function TransactionDetailScreen({ item: initialItem, wallet, selectedNet
         </View>
       </Card>
 
+      {/* Own card: "(7)" next to the status pill reads like a count. */}
+      {!!item.errorCode && (
+        <>
+          <SectionHeader title={t('Error')} />
+          <Card pad={false}>
+            <View style={{ paddingHorizontal: spacing.cardPad }}>
+              <KeyValue first label={t('Error code')} value={String(item.errorCode)} />
+            </View>
+          </Card>
+        </>
+      )}
+
       <SectionHeader title={t('Details')} />
       <Card pad={false}>
         <View style={{ paddingHorizontal: spacing.cardPad }}>
@@ -700,6 +712,7 @@ export function SendScreen({ wallet, auth, tokens = [], initialToken, selectedNe
   const nav = useNav();
   const [recipient, setRecipient] = useState('');
   const [amount, setAmount] = useState('');
+  const [memo, setMemo] = useState('');
   const [asset, setAsset] = useState(initialToken);
   const [assetPickerOpen, setAssetPickerOpen] = useState(false);
   const [scannerOpen, setScannerOpen] = useState(false);
@@ -765,6 +778,7 @@ export function SendScreen({ wallet, auth, tokens = [], initialToken, selectedNe
           asset={asset}
           amount={amount}
           recipient={recipient}
+          memo={memo}
           preview={preview}
           selectedNetwork={selectedNetwork}
           onDone={onDone || nav.popAll}
@@ -781,7 +795,7 @@ export function SendScreen({ wallet, auth, tokens = [], initialToken, selectedNe
       onBack={nav.pop}
       footer={
         <Button
-          label={feeReserveInsufficient ? 'Insufficient QOR for fees' : insufficient ? `${t('Insufficient balance')} · ${asset.symbol}` : t('Review transaction')}
+          label={feeReserveInsufficient ? 'Insufficient QOR for fees' : insufficient ? `${t('Insufficient balance')} ï¿½ ${asset.symbol}` : t('Review transaction')}
           onPress={review}
           disabled={blockedByBalance || !amountValid || !recipient.trim()}
         />
@@ -887,6 +901,32 @@ export function SendScreen({ wallet, auth, tokens = [], initialToken, selectedNe
         </View>
       </Card>
 
+      <SectionHeader title={`${t('Memo')} (${t('optional')})`} />
+      <Card>
+        {/* Same TextInput setup as the recipient field â€” one known-good text
+            control, no new keyboard/focus behavior to debug. */}
+        <View style={{ alignItems: 'center', flexDirection: 'row', gap: 10 }}>
+          <TextInput
+            style={{
+              color: colors.text,
+              flex: 1,
+              fontFamily: fonts.monoRegular,
+              fontSize: 13,
+              padding: 0,
+            }}
+            value={memo}
+            onChangeText={(next) => {
+              setMemo(next.slice(0, 256));
+              setError('');
+            }}
+            placeholder={t('Add an on-chain note')}
+            placeholderTextColor={colors.faint}
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
+        </View>
+      </Card>
+
       {!!error && (
         <View style={{ marginTop: 14 }}>
           <Notice text={error} tone="error" />
@@ -922,7 +962,7 @@ export function SendScreen({ wallet, auth, tokens = [], initialToken, selectedNe
   );
 }
 
-export function SendReviewScreen({ wallet, auth, asset, amount, recipient, preview, selectedNetwork, onDone }: any) {
+export function SendReviewScreen({ wallet, auth, asset, amount, recipient, memo = '', preview, selectedNetwork, onDone }: any) {
   const { colors } = useTheme();
   const { t } = useI18n();
   const nav = useNav();
@@ -970,6 +1010,7 @@ export function SendReviewScreen({ wallet, auth, asset, amount, recipient, previ
         toAddress: recipient,
         amount,
         networkKey: selectedNetwork,
+        memo,
       });
       setResult(res);
       setStatus('success');
